@@ -78,7 +78,6 @@ Expose.prototype.end = function(){
 Expose.prototype.send = function(){
   var req = this.req;
   var res = this.res;
-  var subscribe = req.subscribe;
   var send = res.send;
   var next = req.next;
   var self = this;
@@ -86,13 +85,40 @@ Expose.prototype.send = function(){
   return function(data){
     res.send = send;
 
+    var subscribe = function (doc, callback) {
+      debug(typeof doc)
+      if (typeof doc == 'array') {
+        for (var i = 0, d; d = doc[i]; i++) subscribe(d)
+        return callback(doc)
+      }
+
+      if (!doc || !doc._id) {
+        debug('could not subscribe to document because it does not have an id');
+        throw new Error('Cannot subscribe to documents without ids')
+      }
+      else req.subscribe(doc._id, data.opts.fields, callback);    
+    }
+
     if ('object' == typeof data && data.fulfill) {
       debug('handling res#send promise');
       if (req.get('X-MyDB-SocketId')) {
         debug('mydb - subscribing');
         data.on('complete', function(err, doc){
           if (err) return next(err);
-          if (!doc || !doc._id) return res.send(404);
+
+          subscribe(doc, function (err, id) {
+            if (err) return next(err);
+            if (id == req.get('X-MyDB-Id')) {
+              debug('subscription id matches one provided by client')
+              res.send(304)
+            } else {
+              debug('sending new subscription with document')
+              res.set('X-MyDB-Id', id);
+              res.send(doc)
+            }
+          })
+
+          
           subscribe(doc._id, data.opts.fields, function(err, id){
             if (err) return next(err);
             if (id == req.get('X-MyDB-Id')) {
