@@ -12,6 +12,10 @@ var request = require('superagent');
 var Session = require('./session');
 var debug = require('debug')('mydb-expose');
 
+var utils = require('./utils')
+var Cookie = require('./cookie')
+var signature = require('cookie-signature')
+
 /**
  * Module exports.
  */
@@ -218,17 +222,15 @@ Expose.prototype.createSubscription = function(socketid, id, fields, fn){
   });
 };
 
-/**
- * Returns the overriden `session`.
- *
- * @return {MyDBSession} session object
- */
 
-Expose.prototype.sess = function(){
-  var session = new Session(this.sessions, this.req);
-  this.req.originalSession = this.req.session;
-  return session;
-};
+/**
+ * Generates the session.
+ */
+Expose.prototype.generate = function (sid) {
+  this.req.sessionID = sid || uid(24)
+  this.req.session = new Session(this.sessions, this.req)
+  this.req.session.cookie = new Cookie()
+}
 
 /**
  * Connect middleware.
@@ -257,10 +259,20 @@ Expose.prototype.middleware = function expose(req, res, next){
   this.next = next;
 
   // setup overrides
-  res.subscribe = req.subscribe = this.subscribe();
+  res.subscribe = req.subscribe = this.subscribe(); // TODO (thebyrd) documentation on what this does?
   res.end = this.end();
   res.send = this.send();
 
+  var key = 'mydb.sid' // TODO (thebyrd) support custom key
+
+  var originalPath = require('url').parse(req.originalUrl).pathname
+  if (originalPath.indexOf('/') != 0) return next() // TODO (thebyrd) support cookie path
+
+  // grab the session cookie value and check the signature
+  var rawCookie = req.cookies[key]
+  var unsignedCookie = req.signedCookies[key] || rawCookie && utils.parseSignedCookie(rawCookie, req.secret)
+  this.generate(unsignedCookie)
+  
   // generate a socketid if one is not set
   req.mydb_socketid = req.get('X-MyDB-SocketId');
   if (!req.mydb_socketid) {
@@ -276,12 +288,20 @@ Expose.prototype.middleware = function expose(req, res, next){
   }
 
   function done(){
-    if (req.session) {
-      // session object
-      req.session = self.sess();
+    if (self.req.session) {
+      res.on('header', function () {
+        if (!req.session) return
+
+        var cookie = req.session.cookie
+        var isNew = unsignedCookie != self.req.sessionID
+
+        var val = 's:' + signature.sign(self.req.sessionID, req.secret)
+        val = cookie.serialize(key, val)
+        res.setHeader('Set-Cookie', val)
+      })
 
       // populates the session and moves on
-      req.session.reload(function(err){
+      self.req.session.reload(function(err){
         if (err) return next(err);
         self.routes(next);
       });
